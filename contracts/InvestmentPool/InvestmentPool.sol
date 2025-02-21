@@ -15,9 +15,9 @@ contract InvestmentPool is ReentrancyGuard {
     address public owner;
     address public pauser;
     address public investor;
+    address public immutable creator;
     IERC20 public token;
     FlowToken public flowToken;
-
     uint256 public totalDeposits;
     uint256 public lastProfitDistributionTime;
     bool public paused = false;
@@ -32,7 +32,7 @@ contract InvestmentPool is ReentrancyGuard {
     mapping(address => uint256) public lastUserWithdrawalTime;
 
     event Deposit(address indexed user, uint256 amount, uint256 flowAmount);
-    event ProfitDistributed(uint256 totalProfit, uint256 commission, uint256 timestamp);
+    event ProfitDistributed(uint256 totalProfit, uint256 commission, uint256 creatorTax, uint256 timestamp);
     event WithdrawalProcessed(address indexed user, uint256 flowAmount, uint256 amount);
     event InvestmentWithdrawn(address indexed investor, uint256 amount, string protocol);
     event EmergencyPaused(address indexed pauser, string reason);
@@ -47,6 +47,7 @@ contract InvestmentPool is ReentrancyGuard {
         uint256 _maxDeposit,
         uint256 _withdrawalCooldown,
         uint256 _withdrawalFreezePeriod,
+        address _creator,
         address _owner,
         address _pauser,
         address _investor,
@@ -64,6 +65,7 @@ contract InvestmentPool is ReentrancyGuard {
         require(_maxFreezePeriod >= _withdrawalFreezePeriod, "Max freeze period too short");
         require(_commissionRate <= 100, "Commission rate must be <= 100");
         require(_commissionRate >= 0, "Commission rate must be >= 0");
+        require(_creator != address(0), "Invalid creator address");
 
         owner = _owner;
         pauser = _pauser;
@@ -77,6 +79,7 @@ contract InvestmentPool is ReentrancyGuard {
         MAX_DEPOSIT_LIMIT = _maxDepositLimit;
         MAX_FREEZE_PERIOD = _maxFreezePeriod;
         commissionRate = _commissionRate;
+        creator = _creator;
     }
 
     modifier whenNotPaused() {
@@ -133,20 +136,32 @@ contract InvestmentPool is ReentrancyGuard {
         emit InvestmentWithdrawn(msg.sender, amount, protocol);
     }
 
-    function distributeProfit(uint256 profit) public onlyInvestor nonReentrant {
-        require(profit > 0, "Profit must be greater than 0");
-        require(totalDeposits > 0, "No deposits to distribute profit");
-        require(token.balanceOf(address(this)) >= profit, "Insufficient contract balance");
+    function distributeProfit(int256 profit) public onlyInvestor nonReentrant {
+        require(profit != 0, "Profit cannot be zero");
 
-        uint256 commission = profit * commissionRate / 100;
-        uint256 profitToDistribute = profit - commission;
+        uint256 commission;
+        uint256 creatorTax;
+        uint256 profitToDistribute;
 
-        flowToken.mint(owner, calculateFlowAmount(commission));
+        if (profit > 0) {
+            uint256 uProfit = uint256(profit);
+            require(token.balanceOf(address(this)) >= uProfit, "Insufficient contract balance");
 
-        totalDeposits = totalDeposits + profitToDistribute;
+            commission = uProfit * commissionRate / 100;
+            creatorTax = uProfit * 1 / 100;
+            profitToDistribute = uProfit - commission - creatorTax;
+
+            flowToken.mint(owner, calculateFlowAmount(commission));
+            flowToken.mint(creator, calculateFlowAmount(creatorTax));
+            totalDeposits = totalDeposits + profitToDistribute;
+        } else {
+            uint256 loss = uint256(-profit);
+            require(totalDeposits >= loss, "Insufficient total deposits for loss");
+            totalDeposits = totalDeposits - loss;
+        }
+
         lastProfitDistributionTime = block.timestamp;
-
-        emit ProfitDistributed(profit, commission, block.timestamp);
+        emit ProfitDistributed(uint256(profit), commission, creatorTax, block.timestamp);
     }
 
     function withdraw(uint256 flowAmount) public whenNotPaused nonReentrant {

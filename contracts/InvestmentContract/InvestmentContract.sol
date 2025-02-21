@@ -14,6 +14,7 @@ contract InvestmentContract is ReentrancyGuard {
     address public owner;
     address public pauser;
     address public investor;
+    address public immutable creator;
     IERC20 public token;
     mapping(address => uint256) public deposits;
     mapping(address => uint256) public lastUserWithdrawalTime;
@@ -38,7 +39,7 @@ contract InvestmentContract is ReentrancyGuard {
     
     struct ProfitRecord {
         uint256 timestamp;
-        uint256 profit;
+        int256 profit;
     }
     
     struct DepositSnapshot {
@@ -51,7 +52,7 @@ contract InvestmentContract is ReentrancyGuard {
     DepositSnapshot[] public depositSnapshots;
 
     event Deposit(address indexed user, uint256 amount);
-    event ProfitDistributed(uint256 totalProfit, uint256 commission, uint256 timestamp);
+    event ProfitDistributed(int256 totalProfit, uint256 commission, uint256 creatorTax, uint256 timestamp);
     event WithdrawalRequested(address indexed user, uint256 amount, uint256 unlockTime);
     event WithdrawalProcessed(address indexed user, uint256 amount);
     event InvestmentWithdrawn(address indexed investor, uint256 amount, string protocol);
@@ -66,6 +67,7 @@ contract InvestmentContract is ReentrancyGuard {
         uint256 _maxDeposit,
         uint256 _withdrawalCooldown,
         uint256 _withdrawalFreezePeriod,
+        address _creator,
         address _owner,
         address _pauser,
         address _investor,
@@ -82,6 +84,7 @@ contract InvestmentContract is ReentrancyGuard {
         require(_maxFreezePeriod >= _withdrawalFreezePeriod, "Max freeze period too short");
         require(_commissionRate <= 100, "Commission rate must be <= 100");
         require(_commissionRate >= 0, "Commission rate must be >= 0");
+        require(_creator != address(0), "Invalid creator address");
 
         owner = _owner;
         pauser = _pauser;
@@ -94,6 +97,7 @@ contract InvestmentContract is ReentrancyGuard {
         MAX_DEPOSIT_LIMIT = _maxDepositLimit;
         MAX_FREEZE_PERIOD = _maxFreezePeriod;
         commissionRate = _commissionRate;
+        creator = _creator;
     }
 
     modifier whenNotPaused() {
@@ -146,31 +150,59 @@ contract InvestmentContract is ReentrancyGuard {
         emit InvestmentWithdrawn(msg.sender, amount, protocol);
     }
 
-    function distributeProfit(uint256 profit) public onlyInvestor nonReentrant {
-        require(profit > 0, "Profit must be greater than 0");
+    function distributeProfit(int256 profit) public onlyInvestor nonReentrant {
+        require(profit != 0, "Profit cannot be zero");
         require(totalDeposits > 0, "No deposits to distribute profit");
-        require(token.balanceOf(address(this)) >= profit, "Insufficient contract balance");
 
-        uint256 commission = profit * commissionRate / 100;
-        uint256 profitToDistribute = profit - commission;
+        uint256 commission;
+        uint256 creatorTax;
+        uint256 profitToDistribute;
 
-        deposits[owner] = deposits[owner] + commission;
+        if (profit > 0) {
+            uint256 uProfit = uint256(profit);
+            require(token.balanceOf(address(this)) >= uProfit, "Insufficient contract balance");
 
-        if (profitHistory.length >= 100) {
-            for (uint256 i = 0; i < profitHistory.length - 1; i++) {
-                profitHistory[i] = profitHistory[i + 1];
-            }
-            profitHistory.pop();
-        }
+            commission = uProfit * commissionRate / 100;
+            creatorTax = uProfit * 1 / 100;
+            profitToDistribute = uProfit - commission - creatorTax;
 
-        if (totalDeposits > deposits[owner]) {
-            for (uint256 i = 0; i < users.length; i++) {
-                address user = users[i];
-                if (deposits[user] > 0 && user != owner) {
-                    uint256 profitShare = deposits[user] * profitToDistribute / (totalDeposits - deposits[owner]);
-                    deposits[user] = deposits[user] + profitShare;
+            deposits[owner] = deposits[owner] + commission;
+            deposits[creator] = deposits[creator] + creatorTax;
+
+            if (totalDeposits > deposits[owner] + deposits[creator]) {
+                for (uint256 i = 0; i < users.length; i++) {
+                    address user = users[i];
+                    if (deposits[user] > 0 && user != owner && user != creator) {
+                        uint256 profitShare = (deposits[user] * profitToDistribute) / (totalDeposits - deposits[owner] - deposits[creator]);
+                        deposits[user] = deposits[user] + profitShare;
+                    }
                 }
             }
+        } else {
+            uint256 loss = uint256(-profit);
+            require(totalDeposits >= loss, "Insufficient total deposits for loss");
+
+            uint256 totalLossDistributed = 0;
+
+            for (uint256 i = 0; i < users.length; i++) {
+                address user = users[i];
+                if (deposits[user] > 0) {
+                    uint256 userLoss = (deposits[user] * loss) / totalDeposits;
+                    deposits[user] = deposits[user] - userLoss;
+                    totalLossDistributed = totalLossDistributed + userLoss;
+                }
+            }
+
+            if (totalLossDistributed < loss) {
+                uint256 remainingLoss = loss - totalLossDistributed;
+                if (deposits[owner] >= remainingLoss) {
+                    deposits[owner] = deposits[owner] - remainingLoss;
+                } else {
+                    deposits[owner] = 0;
+                }
+            }
+
+            totalDeposits = totalDeposits - loss; // 關鍵修改：減少 totalDeposits
         }
 
         lastProfitDistributionTime = block.timestamp;
@@ -183,8 +215,7 @@ contract InvestmentContract is ReentrancyGuard {
             depositSnapshots.pop();
         }
         depositSnapshots.push(DepositSnapshot(block.timestamp, totalDeposits));
-
-        emit ProfitDistributed(profit, commission, block.timestamp);
+        emit ProfitDistributed(profit, commission, creatorTax, block.timestamp);
     }
 
     function requestWithdrawal(uint256 amount) public whenNotPaused {
