@@ -202,7 +202,7 @@ contract InvestmentContract is ReentrancyGuard {
                 }
             }
 
-            totalDeposits = totalDeposits - loss; // 關鍵修改：減少 totalDeposits
+            totalDeposits = totalDeposits - loss;
         }
 
         lastProfitDistributionTime = block.timestamp;
@@ -385,36 +385,36 @@ contract InvestmentContract is ReentrancyGuard {
         return totalCount;
     }
 
-    function getAnnualReturnRate() public view returns (uint256) {
+    function getAnnualReturnRate() public view returns (int256) {
         if (depositSnapshots.length == 0 || totalDeposits == 0) return 0;
 
         uint256 oneYearAgo = block.timestamp - 365 days;
-        uint256 annualProfit = 0;
+        int256 annualProfit = 0;
         uint256 weightedDeposits = 0;
         uint256 totalTime = 0;
 
-        for (uint256 i = depositSnapshots.length - 1; i >= 0; i--) {
+        for (uint256 i = depositSnapshots.length - 1; i < depositSnapshots.length; i--) {
             if (depositSnapshots[i].timestamp < oneYearAgo) break;
+            uint256 timeDiff;
             if (i == 0 || depositSnapshots[i-1].timestamp < oneYearAgo) {
-                uint256 timeDiff = block.timestamp - depositSnapshots[i].timestamp;
-                weightedDeposits = weightedDeposits + (depositSnapshots[i].totalDeposits * timeDiff);
-                totalTime = totalTime + timeDiff;
+                timeDiff = block.timestamp - depositSnapshots[i].timestamp;
             } else {
-                uint256 timeDiff = depositSnapshots[i].timestamp - depositSnapshots[i-1].timestamp;
-                weightedDeposits = weightedDeposits + (depositSnapshots[i].totalDeposits * timeDiff);
-                totalTime = totalTime + timeDiff;
+                timeDiff = depositSnapshots[i].timestamp - depositSnapshots[i-1].timestamp;
             }
+            weightedDeposits += depositSnapshots[i].totalDeposits * timeDiff;
+            totalTime += timeDiff;
         }
 
+        if (totalTime == 0) return 0;
         uint256 averageDeposits = weightedDeposits / totalTime;
         if (averageDeposits == 0) return 0;
 
-        for (uint256 i = profitHistory.length - 1; i >= 0; i--) {
+        for (uint256 i = profitHistory.length - 1; i < profitHistory.length; i--) {
             if (profitHistory[i].timestamp < oneYearAgo) break;
-            annualProfit = annualProfit + profitHistory[i].profit;
+            annualProfit += profitHistory[i].profit;
         }
 
-        return (annualProfit * 100) / averageDeposits;
+        return (annualProfit * 100) / int256(averageDeposits);
     }
 
     function removeUser(address user) internal {
